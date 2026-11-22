@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>分類作業</title>
+<style>
+  html,body{margin:0;height:100%;font-family:"Microsoft JhengHei","PingFang TC","Noto Sans TC",sans-serif;background:#fff;color:#1f2a44}
+  #app{max-width:720px;margin:0 auto;padding:16px;min-height:100%;box-sizing:border-box;display:flex;flex-direction:column}
+  h1{font-size:24px;color:#1f3864} p{font-size:18px;line-height:1.7}
+  input{font-size:20px;padding:10px;width:100%;box-sizing:border-box;border:2px solid #9aa7bd;border-radius:8px}
+  button{font-size:20px;padding:14px 18px;border:0;border-radius:10px;background:#1f3864;color:#fff;cursor:pointer}
+  button.alt{background:#fff;color:#1f3864;border:2px solid #1f3864}
+  button.on{background:#5b3ea6;color:#fff;border-color:#5b3ea6}
+  .row{display:flex;gap:12px;margin:12px 0}
+  .row button{flex:1}
+  #labels{display:flex;justify-content:space-between;font-size:18px;font-weight:bold;color:#1f3864;min-height:64px}
+  #labels div{width:46%} #labels div:last-child{text-align:right}
+  #stim{flex:1;display:flex;align-items:center;justify-content:center;font-size:40px;font-weight:bold;min-height:180px}
+  #err{color:#b0245a;font-size:18px;text-align:center;min-height:28px}
+  #keys button{height:110px;font-size:22px}
+  #prog{text-align:center;color:#777;font-size:14px}
+  [hidden]{display:none!important}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- 畫面一：輸入代碼 -->
+<section id="s-start">
+  <h1 id="title"></h1>
+  <p>請輸入研究人員給你的受測者代碼。</p>
+  <input id="pid" autocomplete="off" placeholder="受測者代碼">
+  <p>這是你第幾次做這個作業？</p>
+  <div class="row"><button class="alt" id="ses1">第 1 次</button><button class="alt" id="ses2">第 2 次</button></div>
+  <p id="startMsg" style="color:#b0245a"></p>
+  <button id="go">開始</button>
+</section>
+
+<!-- 畫面二：每個區段開始前的說明 -->
+<section id="s-inst" hidden>
+  <h1 id="instTitle"></h1>
+  <p id="instText"></p>
+  <p>手機請按畫面下方左右兩個按鈕；電腦可以按 E 鍵（左）與 I 鍵（右）。請盡量又快又正確。按錯時會出現提示，請改按另一邊。</p>
+  <button id="instGo">開始這個區段</button>
+</section>
+
+<!-- 畫面三：作答 -->
+<section id="s-task" hidden style="flex:1;display:flex;flex-direction:column">
+  <div id="labels"><div id="labL"></div><div id="labR"></div></div>
+  <div id="stim"></div>
+  <div id="err"></div>
+  <div class="row" id="keys"><button id="btnL">左</button><button id="btnR">右</button></div>
+  <div id="prog"></div>
+</section>
+
+<!-- 畫面四：結束 -->
+<section id="s-end" hidden>
+  <h1>作答完成</h1>
+  <p id="endMsg">資料傳送中，請不要關閉這個頁面。</p>
+  <button id="dl" hidden>下載 CSV</button>
+</section>
+</div>
+
+<script>
+/* ============ 設定區：只需要修改這裡 ============ */
+var CONFIG = /*CONFIG_START*/{
+  title: "分類作業",
+  c1:  { name: "高個子", items: ["高挑","高大","修長","高個兒"] },
+  c2:  { name: "矮個子", items: ["矮小","嬌小","低矮","矮個兒"] },
+  pos: { name: "高能力", items: ["勝任","專業","能幹","精通"] },
+  neg: { name: "低能力", items: ["無能","生疏","拙劣","平庸"] },
+  endpoint: "https://script.google.com/macros/s/AKfycbzmi4BRhnRME7dogba6JBivMXDYni4S-bt8_0SdnoRx-5DMqrqfqDRClw1luIiWf6td/exec"
+}/*CONFIG_END*/;
+/* ============ 設定區結束 ============ */
+
+var N = [20,20,20,40,20,20,40];           // 七個區段的嘗試次數
+var S = { id:"", session:0, order:0, trials:[], b:0, t:0, list:[], t0:0, on:false, firstErr:false };
+
+function $(i){ return document.getElementById(i); }
+function show(i){ ["s-start","s-inst","s-task","s-end"].forEach(function(k){ $(k).hidden = (k!==i); }); }
+function shuffle(a){ a=a.slice(); for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var x=a[i];a[i]=a[j];a[j]=x; } return a; }
+
+/* 依施測順序，回傳七個區段的安排。
+   正向屬性固定在左邊、負向屬性固定在右邊。
+   配對 A：概念 1 在左邊（與正向屬性同鍵）。配對 B：概念 1 在右邊（與負向屬性同鍵）。 */
+function blockPlan(order){
+  var first = order===1 ? "A" : "B", second = order===1 ? "B" : "A";
+  return [
+    {block:1, pairing:first,  phase:"single",   cats:["concept"]},
+    {block:2, pairing:first,  phase:"single",   cats:["attr"]},
+    {block:3, pairing:first,  phase:"practice", cats:["concept","attr"]},
+    {block:4, pairing:first,  phase:"test",     cats:["concept","attr"]},
+    {block:5, pairing:second, phase:"single",   cats:["concept"]},
+    {block:6, pairing:second, phase:"practice", cats:["concept","attr"]},
+    {block:7, pairing:second, phase:"test",     cats:["concept","attr"]}
+  ];
+}
+/* 回傳某個類別在這個配對之下的正確邊 */
+function sideOf(cat, pairing){
+  if(cat==="pos") return "L";
+  if(cat==="neg") return "R";
+  if(cat==="c1")  return pairing==="A" ? "L" : "R";
+  return pairing==="A" ? "R" : "L";
+}
+/* 產生一個區段的字詞清單 */
+function makeList(plan, n){
+  function pool(kind){
+    var keys = kind==="concept" ? ["c1","c2"] : ["pos","neg"], out=[];
+    keys.forEach(function(k){ CONFIG[k].items.forEach(function(w){ out.push({category:k, stimulus:w}); }); });
+    return out;
+  }
+  var bags = {}, list=[];
+  function draw(kind){
+    if(!bags[kind] || bags[kind].length===0) bags[kind] = shuffle(pool(kind));
+    var last = list.length ? list[list.length-1].stimulus : null;
+    if(bags[kind].length>1 && bags[kind][bags[kind].length-1].stimulus===last) bags[kind].unshift(bags[kind].pop());
+    return bags[kind].pop();
+  }
+  for(var i=0;i<n;i++){ list.push(draw(plan.cats[i % plan.cats.length])); }
+  return list;
+}
+
+/* ---------- 計分：D 分數（受測者看不到） ---------- */
+function mean(a){ var s=0; for(var i=0;i<a.length;i++) s+=a[i]; return s/a.length; }
+function sd(a){ var m=mean(a), s=0; for(var i=0;i<a.length;i++) s+=(a[i]-m)*(a[i]-m); return Math.sqrt(s/(a.length-1)); }
+function scoreD(trials){
+  // 步驟 1：只用練習段與正式段
+  var use = trials.filter(function(r){ return r.phase==="practice" || r.phase==="test"; });
+  // 步驟 2：刪除超過 10000 毫秒的嘗試
+  use = use.filter(function(r){ return r.rt_ms <= 10000; });
+  // 步驟 3：每一段分別計算（配對 B 的平均 − 配對 A 的平均）÷ 全部反應時間的標準差
+  function part(phase){
+    var a = use.filter(function(r){ return r.phase===phase && r.pairing==="A"; }).map(function(r){ return r.rt_ms; });
+    var b = use.filter(function(r){ return r.phase===phase && r.pairing==="B"; }).map(function(r){ return r.rt_ms; });
+    if(a.length<2 || b.length<2) return null;
+    return (mean(b)-mean(a)) / sd(a.concat(b));
+  }
+  var dp = part("practice"), dt = part("test");
+  var fast = use.length ? use.filter(function(r){ return r.rt_ms < 300; }).length / use.length : null;
+  var errRate = use.length ? 1 - mean(use.map(function(r){ return r.correct; })) : null;
+  // 步驟 4：兩段取平均；步驟 5：過快反應超過 10% 時，D 分數設為缺失值
+  var D = (dp===null || dt===null || fast>0.10) ? null : (dp+dt)/2;
+  function r4(x){ return x===null ? "" : Math.round(x*10000)/10000; }
+  return { n_trials: use.length, error_rate: r4(errRate), fast_rate: r4(fast), D_practice: r4(dp), D_test: r4(dt), D: r4(D) };
+}
+
+/* ---------- 流程 ---------- */
+function setSession(n){ S.session=n; $("ses1").className = n===1?"on":"alt"; $("ses2").className = n===2?"on":"alt"; }
+function start(){
+  S.id = $("pid").value.trim();
+  if(!S.id){ $("startMsg").textContent="請先輸入受測者代碼。"; return; }
+  if(!S.session){ $("startMsg").textContent="請先選擇這是第幾次。"; return; }
+  S.order = Math.random()<0.5 ? 1 : 2;
+  S.plan = blockPlan(S.order); S.b = 0;
+  showInst();
+}
+function labels(plan){
+  var L=[], R=[];
+  if(plan.cats.indexOf("concept")>=0){ (sideOf("c1",plan.pairing)==="L"?L:R).push(CONFIG.c1.name); (sideOf("c2",plan.pairing)==="L"?L:R).push(CONFIG.c2.name); }
+  if(plan.cats.indexOf("attr")>=0){ L.push(CONFIG.pos.name); R.push(CONFIG.neg.name); }
+  return {L:L.join(" 或 "), R:R.join(" 或 ")};
+}
+function showInst(){
+  var p = S.plan[S.b], lab = labels(p);
+  $("instTitle").textContent = "第 " + p.block + " 個區段（共 7 個）";
+  $("instText").textContent = "畫面中央會出現字詞。字詞屬於「" + lab.L + "」時請按左邊；屬於「" + lab.R + "」時請按右邊。"
+    + (p.block===5 ? "請注意：左右兩邊的類別位置已經互換。" : "");
+  show("s-inst");
+}
+function startBlock(){
+  var p = S.plan[S.b], lab = labels(p);
+  S.list = makeList(p, N[S.b]); S.t = 0;
+  $("labL").textContent = lab.L; $("labR").textContent = lab.R;
+  show("s-task"); nextTrial();
+}
+function nextTrial(){
+  if(S.t >= S.list.length){ S.b++; if(S.b>=7) finish(); else showInst(); return; }
+  $("err").textContent = ""; $("stim").textContent = S.list[S.t].stimulus;
+  $("prog").textContent = (S.t+1) + " / " + S.list.length;
+  S.firstErr = false; S.t0 = performance.now(); S.on = true;
+}
+function answer(side){
+  if(!S.on) return;
+  var p = S.plan[S.b], item = S.list[S.t];
+  if(side !== sideOf(item.category, p.pairing)){ S.firstErr = true; $("err").textContent = "分類錯誤，請改按另一邊。"; return; }
+  S.on = false;
+  S.trials.push({ block:p.block, pairing:p.pairing, phase:p.phase, trial:S.t+1, category:item.category,
+                  stimulus:item.stimulus, correct:S.firstErr?0:1, rt_ms:Math.round(performance.now()-S.t0) });
+  S.t++; $("stim").textContent = "＋"; setTimeout(nextTrial, 250);
+}
+function toCSV(){
+  var head = ["participant_id","session","order","block","pairing","phase","trial","category","stimulus","correct","rt_ms"];
+  var rows = S.trials.map(function(r){ return [S.id,S.session,S.order,r.block,r.pairing,r.phase,r.trial,r.category,r.stimulus,r.correct,r.rt_ms].join(","); });
+  return "﻿" + head.join(",") + "\n" + rows.join("\n");
+}
+function offerDownload(){
+  $("endMsg").textContent = "資料沒有成功傳送。請按下方按鈕下載檔案，並且把檔案交給研究人員。";
+  $("dl").hidden = false;
+  $("dl").onclick = function(){
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([toCSV()], {type:"text/csv"}));
+    a.download = "iat_" + S.id + "_s" + S.session + ".csv"; a.click();
+  };
+}
+function finish(){
+  show("s-end");
+  var payload = { id:S.id, session:S.session, order:S.order, trials:S.trials, score:scoreD(S.trials) };
+  if(!CONFIG.endpoint){ offerDownload(); return; }
+  fetch(CONFIG.endpoint, { method:"POST", headers:{"Content-Type":"text/plain;charset=utf-8"}, body:JSON.stringify(payload) })
+    .then(function(r){ return r.text(); })
+    .then(function(t){ if(t.trim()==="ok") $("endMsg").textContent = "資料已經送出，謝謝你的參與。現在可以關閉這個頁面。"; else offerDownload(); })
+    .catch(offerDownload);
+}
+
+$("title").textContent = CONFIG.title; document.title = CONFIG.title;
+$("ses1").onclick = function(){ setSession(1); }; $("ses2").onclick = function(){ setSession(2); };
+$("go").onclick = start; $("instGo").onclick = startBlock;
+$("btnL").onclick = function(){ answer("L"); }; $("btnR").onclick = function(){ answer("R"); };
+document.addEventListener("keydown", function(e){ var k=(e.key||"").toLowerCase(); if(k==="e") answer("L"); if(k==="i") answer("R"); });
+</script>
+</body>
+</html>
